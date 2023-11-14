@@ -80,8 +80,12 @@ def main():
     model = model_class.load_from_checkpoint(ckpt_path, args=model_args)
 
     # Perform forward pass using model
+    pred = []
+    targ = [] 
     for batch in val_loader:
         prediction, target = predict_on_batch(model, batch)
+        pred.append(prediction)
+        targ.append(target)
         # Prediction and target of shape (B, T, N_y, N_x, d_X)
         # See predict_on_batch doc-string
 
@@ -91,8 +95,9 @@ def main():
         #  plt.imshow(prediction[0,18,:,:,0], origin="lower", cmap="plasma")
         #  plt.show()
         # See also `neural_lam/vis.py` for plotting inspiration
+    return torch.vstack(pred), torch.vstack(target)
 
 if __name__ == "__main__":
-    main()
+    preds, targets = main()
 
 # %% 
