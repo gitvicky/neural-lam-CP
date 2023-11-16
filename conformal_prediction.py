@@ -21,6 +21,7 @@ INTERIOR_SHAPE = tuple(dim - 2*10 for dim in constants.grid_shape)
 # Actual config for CP
 MODEL = "Hi-LAM" # Hi-LAM or GC-LAM
 DS_NAME = "meps_example" # must match sub-directory in data
+DS_NAME = "validation_june"
 BATCH_SIZE = 1
 
 # %% 
@@ -101,3 +102,60 @@ if __name__ == "__main__":
     preds, targets = main()
 
 # %% 
+# def calibrate(pred, target, alpha):
+
+#     n = len(pred)
+#     cal_scores = np.abs(pred.numpy()-target.numpy())           
+#     qhat = np.quantile(cal_scores, np.ceil((n+1)*(1-alpha))/n, axis = 0, method='higher')
+#     return qhat 
+
+# def predict_coverage(pred, qhat):
+#     prediction_sets = [pred - qhat, pred + qhat]
+#     empirical_coverage = ((pred.numpy() >= prediction_sets[0].numpy()) & (pred.numpy() <= prediction_sets[1].numpy())).mean()
+#     print(f"The empirical coverage after calibration is: {empirical_coverage}")
+#     return prediction_sets
+
+
+# ncal = 150
+# alpha = 0.1
+# preds, targets = main()
+# preds = torch.vstack(preds)
+# targets = torch.vstack(targets)
+
+# # %% 
+# idx = np.random.randint(270, ncal)
+# calibration_data = [preds]
+# qhat = calibrate(preds[:ncal], targets[:ncal], 0.5)
+# pred_sets = predict_coverage(preds[ncal:], qhat)
+
+# # %% 
+
+# #Slicing along X-Axis
+
+# idx = 10
+# var = 2
+# y_pos = 20
+# time = 10 
+# x_grid = np.linspace(0, 1, 248)
+
+
+# plt.figure()
+# plt.plot(x_grid, preds[ncal:][idx, var, :, y_pos, time], label='Pred.', alpha=0.8,  color = 'firebrick')
+# plt.plot(x_grid, pred_sets[0][idx, var, :, y_pos, time], label='Lower', alpha=0.8,  color = 'teal', ls='--')
+# plt.plot(x_grid, pred_sets[1][idx, var,:, y_pos, time], label='Upper', alpha=0.8,  color = 'navy', ls='--')
+# plt.plot(x_grid, targets[ncal:][idx, var,:, y_pos, time], label='Actual', alpha=0.8,  color = 'black')
+# plt.legend()
+# plt.xlabel('X')
+# plt.ylabel('var')
+# plt.title('Coverage at alpha = ' + str(alpha))
+# plt.grid() #Comment out if you dont want grids.
+
+
+# # %%
+# #Estimating Coverage at all Alpha values 
+
+# for ii in range()
+# alpha_levels = np.arange(0.05, 0.95, 0.1)
+# emp_cov = []
+# for ii in tqdm(range(len(alpha_levels))):
+#     emp_cov.append(calibrate(alpha_levels[ii]))
