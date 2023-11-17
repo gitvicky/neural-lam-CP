@@ -1,12 +1,19 @@
 # %%
 import os
 import torch
+import numpy as np
+from tqdm import tqdm
+from matplotlib import pyplot as plt 
 
+#%% 
 from neural_lam.models.graph_lam import GraphLAM
 from neural_lam.models.hi_lam import HiLAM
 
 from neural_lam.weather_dataset import WeatherDataset
 from neural_lam import constants
+
+# %%
+plt.rcParams['text.usetex'] = True
 
 # %% 
 # Paths to saved models
@@ -20,11 +27,11 @@ INTERIOR_SHAPE = tuple(dim - 2*10 for dim in constants.grid_shape)
 
 # Actual config for CP
 MODEL = "Hi-LAM" # Hi-LAM or GC-LAM
-DS_NAME = "meps_example" # must match sub-directory in data
-DS_NAME = "validation_june"
-BATCH_SIZE = 1
+# DS_NAME = "meps_example" # must match sub-directory in data
+DS_NAME = "validation_june" #270 data points
+BATCH_SIZE = 10
 
-# %% 
+#%% 
 @torch.no_grad()
 def predict_on_batch(model, batch):
     """
@@ -83,7 +90,7 @@ def main():
     # Perform forward pass using model
     pred = []
     targ = [] 
-    for batch in val_loader:
+    for batch in tqdm(val_loader):
         prediction, target = predict_on_batch(model, batch)
         pred.append(prediction)
         targ.append(target)
@@ -96,39 +103,64 @@ def main():
         #  plt.imshow(prediction[0,18,:,:,0], origin="lower", cmap="plasma")
         #  plt.show()
         # See also `neural_lam/vis.py` for plotting inspiration
-    return torch.vstack(pred), torch.vstack(target)
+    return pred, targ
 
-if __name__ == "__main__":
-    preds, targets = main()
+def non_conformity(pred, target):
+    cal_scores = np.abs(pred-target)           
+    return cal_scores
+
+def qhat_estimate(cal_scores, alpha):
+  n = len(cal_scores)
+  return np.quantile(cal_scores, np.ceil((n+1)*(1-alpha))/n, axis = 0, method='higher')
+
+def predict_coverage(pred, targets, qhat):
+    prediction_sets = [pred - qhat, pred + qhat]
+    empirical_coverage = ((targets >= prediction_sets[0]) & (targets <= prediction_sets[1])).mean()
+    print(f"The empirical coverage after calibration is: {empirical_coverage}")
+    return empirical_coverage, prediction_sets
 
 # %% 
-# def calibrate(pred, target, alpha):
 
-#     n = len(pred)
-#     cal_scores = np.abs(pred.numpy()-target.numpy())           
-#     qhat = np.quantile(cal_scores, np.ceil((n+1)*(1-alpha))/n, axis = 0, method='higher')
-#     return qhat 
+if __name__ == "__main__":
 
-# def predict_coverage(pred, qhat):
-#     prediction_sets = [pred - qhat, pred + qhat]
-#     empirical_coverage = ((pred.numpy() >= prediction_sets[0].numpy()) & (pred.numpy() <= prediction_sets[1].numpy())).mean()
-#     print(f"The empirical coverage after calibration is: {empirical_coverage}")
-#     return prediction_sets
+    # Obtaining the data by running the model. 
+    # preds, targets = main()
+    # preds = torch.vstack(preds).numpy()
+    # targets = torch.vstack(targets).numpy()
+
+    #Loading the prediction and target data. pre-saved. 
+    preds = np.load(os.getcwd() + '/saved_data/preds_june.npy')
+    targets = np.load(os.getcwd() + '/saved_data/targets_june.npy')
+
+    ncal = 200
+    alpha = 0.1
+    rand_idx = np.random.randint(0, 270, 270)
+    cal_idx = rand_idx[:ncal]
+    pred_idx = rand_idx[ncal:]
+    pred_idx = np.delete(np.arange(270), cal_idx)
+    cal_scores = non_conformity(preds[cal_idx], targets[cal_idx])
+    # qhat = qhat_estimate(cal_scores, alpha)
+    # coverage, pred_sets = predict_coverage(preds[pred_idx], targets[pred_idx],  qhat)
+
+    #Testing coverage across values of alpha
+
+    alpha_levels = np.arange(0.05, 0.95, 0.1)
+    emp_cov = []
+    for alpha in tqdm(alpha_levels):
+        qhat = qhat_estimate(cal_scores, alpha)
+        emp_cov.append(predict_coverage(preds[pred_idx], targets[pred_idx], qhat)[0])
 
 
-# ncal = 150
-# alpha = 0.1
-# preds, targets = main()
-# preds = torch.vstack(preds)
-# targets = torch.vstack(targets)
-
-# # %% 
-# idx = np.random.randint(270, ncal)
-# calibration_data = [preds]
-# qhat = calibrate(preds[:ncal], targets[:ncal], 0.5)
-# pred_sets = predict_coverage(preds[ncal:], qhat)
-
-# # %% 
+    plt.plot(1-alpha_levels, 1-alpha_levels, label='Ideal', color ='black', alpha=0.75)
+    plt.plot(1-alpha_levels, emp_cov, label='Residual' ,ls='-.', color='teal', alpha=0.75)
+    plt.xlabel(r'1-$\alpha$')
+    plt.ylabel('Empirical Coverage')
+    plt.title("June")
+    plt.legend()
+    plt.grid() #Comment out if you dont want grids.
+    # plt.savefig("June-Graphcast.svg", format="svg", bbox_inches='tight')
+    plt.show()
+# %% 
 
 # #Slicing along X-Axis
 
@@ -140,10 +172,10 @@ if __name__ == "__main__":
 
 
 # plt.figure()
-# plt.plot(x_grid, preds[ncal:][idx, var, :, y_pos, time], label='Pred.', alpha=0.8,  color = 'firebrick')
+# plt.plot(x_grid, preds[pred_idx][idx, var, :, y_pos, time], label='Pred.', alpha=0.8,  color = 'firebrick')
 # plt.plot(x_grid, pred_sets[0][idx, var, :, y_pos, time], label='Lower', alpha=0.8,  color = 'teal', ls='--')
 # plt.plot(x_grid, pred_sets[1][idx, var,:, y_pos, time], label='Upper', alpha=0.8,  color = 'navy', ls='--')
-# plt.plot(x_grid, targets[ncal:][idx, var,:, y_pos, time], label='Actual', alpha=0.8,  color = 'black')
+# plt.plot(x_grid, targets[pred_idx][idx, var,:, y_pos, time], label='Actual', alpha=0.8,  color = 'black')
 # plt.legend()
 # plt.xlabel('X')
 # plt.ylabel('var')
@@ -151,11 +183,4 @@ if __name__ == "__main__":
 # plt.grid() #Comment out if you dont want grids.
 
 
-# # %%
-# #Estimating Coverage at all Alpha values 
-
-# for ii in range()
-# alpha_levels = np.arange(0.05, 0.95, 0.1)
-# emp_cov = []
-# for ii in tqdm(range(len(alpha_levels))):
-#     emp_cov.append(calibrate(alpha_levels[ii]))
+# %%
