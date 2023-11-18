@@ -7,6 +7,8 @@ graphs
 *.sif
 sweeps
 test_*.sh
+cp_plots
+saved_data
 
 ### Python ###
 # Byte-compiled / optimized / DLL files

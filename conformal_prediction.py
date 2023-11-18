@@ -10,7 +10,7 @@ from neural_lam.models.graph_lam import GraphLAM
 from neural_lam.models.hi_lam import HiLAM
 
 from neural_lam.weather_dataset import WeatherDataset
-from neural_lam import constants
+from neural_lam import constants, utils
 
 # %%
 plt.rcParams['text.usetex'] = True
@@ -30,6 +30,7 @@ MODEL = "Hi-LAM" # Hi-LAM or GC-LAM
 # DS_NAME = "meps_example" # must match sub-directory in data
 DS_NAME = "validation_june" #270 data points
 BATCH_SIZE = 10
+PLOT_DIR = "cp_plots"
 
 #%%
 @torch.no_grad()
@@ -196,6 +197,60 @@ def plot_slice(preds, targets, pred_idx, qhat, alpha):
     plt.grid() #Comment out if you dont want grids.
     plt.show()
 
+def plot_qhat(q_hat, alpha, data_std):
+    """
+    Plot predictions intervals (q_hat)
+
+    q_hat: (T, N_y, N_x, dim_var)
+    alpha: scalar
+    data_std: (dim_var,)
+    """
+    time_indices = (4, 10, 18)
+
+    # Recompute extent of plotting area, as boundary is removed
+    boundary_size_x = (10/constants.grid_shape[0])*(
+            constants.grid_limits[1]-constants.grid_limits[0])
+    boundary_size_y = (10/constants.grid_shape[1])*(
+            constants.grid_limits[3]-constants.grid_limits[2])
+    internal_grid_limits = (
+        constants.grid_limits[0] + boundary_size_x, # min x
+        constants.grid_limits[1] - boundary_size_x, # max x
+        constants.grid_limits[2] + boundary_size_y, # min y
+        constants.grid_limits[3] - boundary_size_y, # max y
+    )
+
+    # Make one plot per variable
+    for var_i, (var_name, var_unit, var_std)in enumerate(zip(constants.param_names_short,
+            constants.param_units, data_std)):
+        # Extract q_hat:s to plot, and rescale to original data scale
+        q_hat_plot = q_hat[time_indices,:,:,var_i]*var_std # (3, N_y, N_x)
+
+        # Compute range of values (makes most sense to keep vmin=0)
+        vmin = 0 # q_hat_plot.min()
+        vmax = q_hat_plot.max()
+
+        fig, axes = plt.subplots(1, len(time_indices), figsize=(10,3),
+                subplot_kw={"projection": constants.lambert_proj})
+
+        for q_hat_field, ax, time_step in zip(q_hat_plot, axes, time_indices):
+            ax.coastlines(linewidth=0.3) # Add coastline outlines
+            im = ax.imshow(q_hat_field, origin="lower",
+                        extent=internal_grid_limits, vmin=vmin, vmax=vmax,
+                        cmap="Reds")
+
+            # Add lead time title to subplots
+            ax.set_title(f"{3*(time_step+1)} h")
+
+        # Add color bar
+        cbar = fig.colorbar(im, ax=axes, orientation="vertical", fraction=.01, aspect=50,
+                pad=0.01)
+        cbar.ax.set_ylabel("$\hat{q}$" + f" ({var_unit})")
+
+        # Save
+        fig.savefig(os.path.join(PLOT_DIR, f"alpha_{alpha}_{var_name}_qhat.pdf"),
+                bbox_inches='tight')
+    plt.close("all") # Close all figs
+
 if __name__ == "__main__":
 
     # Obtaining the data by running the model.
@@ -221,18 +276,19 @@ if __name__ == "__main__":
     alpha_levels = np.arange(0.05, 0.95, 0.1)
 
     # Compute qhat from saved predictions and targets
-    #qhats = compute_qhats(preds, targets, cal_idx, alpha_levels)
-    #np.save(os.getcwd() + '/saved_data/qhats_june.npy', qhats)
+    #  qhats = compute_qhats(preds, targets, cal_idx, alpha_levels)
+    #  np.save(os.getcwd() + '/saved_data/qhats_june.npy', qhats)
     qhats = np.load(os.getcwd() + '/saved_data/qhats_june.npy')
 
     # Compute and plot empirical coverage
     #plot_emp_cov(preds, targets, qhats, pred_idx, alpha_levels)
 
     # Plot slice of data
-    plot_slice(preds, targets, pred_idx, qhats[0], alpha_levels[0])
-    plot_slice(preds, targets, pred_idx, qhats[-1], alpha_levels[-1])
+    #  plot_slice(preds, targets, pred_idx, qhats[0], alpha_levels[0])
+    #  plot_slice(preds, targets, pred_idx, qhats[-1], alpha_levels[-1])
 
-# %%
-
-
-# %%
+    # Plot q-hat spatio-temporally
+    os.makedirs(PLOT_DIR, exist_ok=True)
+    data_std = utils.load_static_data(DS_NAME)["data_std"].numpy()
+    plot_qhat(qhats[0], alpha_levels[0], data_std)
+    plot_qhat(qhats[-1], alpha_levels[-1], data_std)
