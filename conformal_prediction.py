@@ -31,6 +31,7 @@ MODEL = "Hi-LAM" # Hi-LAM or GC-LAM
 DS_NAME = "validation_june" #270 data points
 BATCH_SIZE = 10
 PLOT_DIR = "cp_plots"
+PRED_PLOT_DIR = "cp_pred_plots"
 
 #%%
 @torch.no_grad()
@@ -247,7 +248,70 @@ def plot_qhat(q_hat, alpha, data_std):
         cbar.ax.set_ylabel("$\hat{q}$" + f" ({var_unit})")
 
         # Save
-        fig.savefig(os.path.join(PLOT_DIR, f"alpha_{alpha}_{var_name}_qhat.pdf"),
+        fig.savefig(os.path.join(PLOT_DIR, f"alpha_{alpha}_{var_name}_qhat.pdf"))
+    plt.close("all") # Close all figs
+
+def plot_pred(pred, target, data_mean, data_std):
+    """
+    Plot predictions and targets
+
+    pred: (T, N_y, N_x, dim_var)
+    target: (T, N_y, N_x, dim_var)
+    data_mean: (dim_var,)
+    data_std: (dim_var,)
+    """
+    time_indices = (4, 10, 18)
+
+    # Recompute extent of plotting area, as boundary is removed
+    boundary_size_x = (10/constants.grid_shape[0])*(
+            constants.grid_limits[1]-constants.grid_limits[0])
+    boundary_size_y = (10/constants.grid_shape[1])*(
+            constants.grid_limits[3]-constants.grid_limits[2])
+    internal_grid_limits = (
+        constants.grid_limits[0] + boundary_size_x, # min x
+        constants.grid_limits[1] - boundary_size_x, # max x
+        constants.grid_limits[2] + boundary_size_y, # min y
+        constants.grid_limits[3] - boundary_size_y, # max y
+    )
+
+    # Make one plot per variable
+    for var_i, (var_name, var_unit, var_mean, var_std)in enumerate(zip(constants.param_names_short,
+            constants.param_units, data_mean, data_std)):
+        # Extract q_hat:s to plot, and rescale to original data scale
+        pred_plot = pred[time_indices,:,:,var_i]*var_std + var_mean # (3, N_y, N_x)
+        target_plot = target[time_indices,:,:,var_i]*var_std + var_mean # (3, N_y, N_x)
+
+        # Compute range of values
+        vmin = min(pred_plot.min(), target_plot.min())
+        vmax = min(pred_plot.max(), target_plot.max())
+
+        fig, axes = plt.subplots(2, len(time_indices), figsize=(8,6),
+                subplot_kw={"projection": constants.lambert_proj})
+
+        for fields, axes_row in zip((pred_plot, target_plot), axes):
+            for field, ax, time_step in zip(fields, axes_row, time_indices):
+                ax.coastlines(linewidth=0.3) # Add coastline outlines
+                im = ax.imshow(field, origin="lower",
+                            extent=internal_grid_limits, vmin=vmin, vmax=vmax,
+                            cmap="plasma")
+
+                # Add lead time title to subplots
+                ax.set_title(f"{3*(time_step+1)} h")
+
+        # Write out pred and target
+        axes[0,0].set_ylabel("Prediction", size="large")
+        axes[0,0].set_yticks([])
+        axes[1,0].set_ylabel("Ground Truth", size="large")
+        axes[1,0].set_yticks([])
+
+        # Add color bar
+        cbar = fig.colorbar(im, ax=axes, orientation="vertical", fraction=.01, aspect=50,
+                pad=0.01)
+        if var_unit != "-":
+            cbar.ax.set_ylabel(f"{var_unit}")
+
+        # Save
+        fig.savefig(os.path.join(PRED_PLOT_DIR, f"{var_name}.pdf"),
                 bbox_inches='tight')
     plt.close("all") # Close all figs
 
@@ -262,8 +326,10 @@ if __name__ == "__main__":
     np.random.seed(42)
 
     #Loading the prediction and target data. pre-saved.
-    preds = np.load(os.getcwd() + '/saved_data/preds_june.npy', mmap_mode="r")
-    targets = np.load(os.getcwd() + '/saved_data/targets_june.npy', mmap_mode="r")
+    preds = np.load(os.getcwd() + '/saved_data/preds_june.npy',
+            mmap_mode="r") # (B, T, N_y, N_x, d_X)
+    targets = np.load(os.getcwd() + '/saved_data/targets_june.npy',
+            mmap_mode="r") # (B, T, N_y, N_x, d_X)
     print("Loaded data!")
 
     ncal = 200
@@ -287,8 +353,18 @@ if __name__ == "__main__":
     #  plot_slice(preds, targets, pred_idx, qhats[0], alpha_levels[0])
     #  plot_slice(preds, targets, pred_idx, qhats[-1], alpha_levels[-1])
 
+    # Get data stats
+    static_data = utils.load_static_data(DS_NAME)
+    data_std = static_data["data_std"].numpy()
+    data_mean = static_data["data_mean"].numpy()
+
     # Plot q-hat spatio-temporally
-    os.makedirs(PLOT_DIR, exist_ok=True)
-    data_std = utils.load_static_data(DS_NAME)["data_std"].numpy()
-    plot_qhat(qhats[0], alpha_levels[0], data_std)
-    plot_qhat(qhats[-1], alpha_levels[-1], data_std)
+    #  os.makedirs(PLOT_DIR, exist_ok=True)
+    #  plot_qhat(qhats[0], alpha_levels[0], data_std)
+    #  plot_qhat(qhats[-1], alpha_levels[-1], data_std)
+
+    # Plot example prediction
+    os.makedirs(PRED_PLOT_DIR, exist_ok=True)
+    example_pred = preds[pred_idx[0]] # From pred set
+    example_target = targets[pred_idx[0]]
+    plot_pred(example_pred, example_target, data_mean, data_std)
