@@ -17,18 +17,20 @@ plt.rcParams['text.usetex'] = True
 
 # %%
 # Paths to saved models
-CKPT_DIR = "saved_models"
-HI_LAM_PATH = os.path.join(CKPT_DIR, "Hi-LAM.ckpt")
-GC_LAM_PATH = os.path.join(CKPT_DIR, "GC-LAM.ckpt")
+CKPT_DIR = "/proj/berzelius-2022-164/weather/ws_res_models"
+HI_LAM_WMSE_PATH = os.path.join(CKPT_DIR, "Hi-LAM.ckpt")
+HI_LAM_NLL_PATH = os.path.join(CKPT_DIR, "hi_lam_nll.ckpt")
+#GC_LAM_PATH = os.path.join(CKPT_DIR, "GC-LAM.ckpt")
 
 # %%
 # Remove boundary area of 10 x 2 grid cells
-INTERIOR_SHAPE = tuple(dim - 2*10 for dim in constants.grid_shape)
+INTERIOR_SHAPE = tuple(dim - 2*10 for dim in constants.GRID_SHAPE)
 
 # Actual config for CP
 MODEL = "Hi-LAM" # Hi-LAM or GC-LAM
-# DS_NAME = "meps_example" # must match sub-directory in data
-DS_NAME = "validation_june" #270 data points
+# must match sub-directory in data
+DS_NAME = "conf_data_sep" # sep 2021 + 2022
+#DS_NAME = "meps_example"
 BATCH_SIZE = 10
 PLOT_DIR = "cp_plots"
 PRED_PLOT_DIR = "cp_pred_plots"
@@ -53,17 +55,27 @@ def predict_on_batch(model, batch):
     d_X = 17 (Number of weather variables being forecast in each grid cell)
     """
     # Predict
-    prediction, target = model.common_step(batch) # Both (B, T, N, d_X)
+    prediction, target, pred_std = model.common_step(batch) # Both (B, T, N, d_X)
 
     # Remove boundary
     interior_mask = (model.interior_mask[:,0] == 1.) # boolean, (N,)
-    interior_prediction = prediction[:,:,interior_mask]
-    interior_target = target[:,:,interior_mask]
+    new_shape = target.shape[:2] + INTERIOR_SHAPE + target.shape[3:]
 
-    new_shape = interior_target.shape[:2] + INTERIOR_SHAPE + interior_target.shape[3:]
-    return interior_prediction.reshape(new_shape), interior_target.reshape(new_shape)
+    interior_prediction = prediction[:,:,interior_mask].reshape(new_shape)
+    interior_target = target[:,:,interior_mask].reshape(new_shape)
 
-def main():
+    if len(pred_std.shape) > 1:
+        # Actually outputs interior std
+        pred_std = pred_std[:,:,interior_mask].reshape(new_shape)
+
+    return (
+        interior_prediction,
+        interior_target,
+        pred_std,
+    )
+
+@torch.no_grad()
+def predict_on_all():
     # Load data
     # "val" and "test" here correspond to sub-directories in `data/DS_NAME/samples`,
     # so one could for example structure things be having one directory "calibration"
@@ -75,37 +87,58 @@ def main():
     # Instantiate model
     if MODEL == "Hi-LAM":
         model_class = HiLAM
-        ckpt_path = HI_LAM_PATH
         graph_name = "hierarchical"
     else:
         model_class = GraphLAM
-        ckpt_path = GC_LAM_PATH
         graph_name = "multiscale"
 
-    # Need to adjust a few parameters in the model arguments to load correctly
-    model_args = torch.load(ckpt_path, map_location="cpu")["hyper_parameters"]["args"]
-    model_args.dataset = DS_NAME
-    model_args.graph = graph_name
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    for model_name, ckpt_path, save_std in (
+        ("hi_lam_nll", HI_LAM_NLL_PATH, True),
+        ("hi_lam_wmse", HI_LAM_WMSE_PATH, False),
+    ):
+        # Need to adjust a few parameters in the model arguments to load correctly
+        model_args = torch.load(ckpt_path,
+                map_location="cpu")["hyper_parameters"]["args"]
+        model_args.dataset = DS_NAME
+        model_args.graph = graph_name
+        model_args.output_std = int(save_std) # Need to add on for older model
 
-    model = model_class.load_from_checkpoint(ckpt_path, args=model_args)
+        model_save_dir = os.path.join("saved_data", model_name)
+        os.makedirs(model_save_dir, exist_ok=True)
 
-    # Perform forward pass using model
-    pred = []
-    targ = []
-    for batch in tqdm(val_loader):
-        prediction, target = predict_on_batch(model, batch)
-        pred.append(prediction)
-        targ.append(target)
-        # Prediction and target of shape (B, T, N_y, N_x, d_X)
-        # See predict_on_batch doc-string
+        model = model_class.load_from_checkpoint(ckpt_path, args=model_args).to(device)
 
-        # Do something cool with prediction and target ...
+        for subset_name, loader in (
+            ("val", val_loader),
+            ("test", test_loader),
+        ):
+            print(f"Computing predictions: Model = {model_name}, Set = {subset_name}")
+            # Perform forward pass using model
+            pred = []
+            targ = []
+            stds = []
+            for batch in tqdm(val_loader):
+                batch = (t.to(device) for t in batch)
+                prediction, target, pred_std = predict_on_batch(model, batch)
+                # all of shape (B, T, N_y, N_x, d_X)
 
-        # Can for example plot like
-        #  plt.imshow(prediction[0,18,:,:,0], origin="lower", cmap="plasma")
-        #  plt.show()
-        # See also `neural_lam/vis.py` for plotting inspiration
-    return pred, targ
+                pred.append(prediction)
+                targ.append(target)
+                stds.append(pred_std)
+
+            pred_np = torch.cat(pred, dim=0).cpu().numpy()
+            np.save(os.path.join(model_save_dir, f"{subset_name}_pred.npy"), pred_np)
+            del pred_np
+
+            targ_np = torch.cat(targ, dim=0).cpu().numpy()
+            np.save(os.path.join(model_save_dir, f"{subset_name}_target.npy"), targ_np)
+            del targ_np
+
+            if save_std:
+                all_std = torch.cat(stds, dim=0)
+                std_np = all_std.cpu().numpy()
+                np.save(os.path.join(model_save_dir, f"{subset_name}_std.npy"), std_np)
 
 def non_conformity(pred, target, cal_idx):
     print("Computing non-conformity scores")
@@ -209,20 +242,20 @@ def plot_qhat(q_hat, alpha, data_std):
     time_indices = (4, 10, 18)
 
     # Recompute extent of plotting area, as boundary is removed
-    boundary_size_x = (10/constants.grid_shape[0])*(
-            constants.grid_limits[1]-constants.grid_limits[0])
-    boundary_size_y = (10/constants.grid_shape[1])*(
-            constants.grid_limits[3]-constants.grid_limits[2])
+    boundary_size_x = (10/constants.GRID_SHAPE[0])*(
+            constants.GRID_LIMITS[1]-constants.GRID_LIMITS[0])
+    boundary_size_y = (10/constants.GRID_SHAPE[1])*(
+            constants.GRID_LIMITS[3]-constants.GRID_LIMITS[2])
     internal_grid_limits = (
-        constants.grid_limits[0] + boundary_size_x, # min x
-        constants.grid_limits[1] - boundary_size_x, # max x
-        constants.grid_limits[2] + boundary_size_y, # min y
-        constants.grid_limits[3] - boundary_size_y, # max y
+        constants.GRID_LIMITS[0] + boundary_size_x, # min x
+        constants.GRID_LIMITS[1] - boundary_size_x, # max x
+        constants.GRID_LIMITS[2] + boundary_size_y, # min y
+        constants.GRID_LIMITS[3] - boundary_size_y, # max y
     )
 
     # Make one plot per variable
-    for var_i, (var_name, var_unit, var_std)in enumerate(zip(constants.param_names_short,
-            constants.param_units, data_std)):
+    for var_i, (var_name, var_unit, var_std)in enumerate(zip(constants.PARAM_NAMES_SHORT,
+            constants.PARAM_UNITS, data_std)):
         # Extract q_hat:s to plot, and rescale to original data scale
         q_hat_plot = q_hat[time_indices,:,:,var_i]*var_std # (3, N_y, N_x)
 
@@ -231,7 +264,7 @@ def plot_qhat(q_hat, alpha, data_std):
         vmax = q_hat_plot.max()
 
         fig, axes = plt.subplots(1, len(time_indices), figsize=(10,3),
-                subplot_kw={"projection": constants.lambert_proj})
+                subplot_kw={"projection": constants.LAMBERT_PROJ})
 
         for q_hat_field, ax, time_step in zip(q_hat_plot, axes, time_indices):
             ax.coastlines(linewidth=0.3) # Add coastline outlines
@@ -263,20 +296,20 @@ def plot_pred(pred, target, data_mean, data_std):
     time_indices = (4, 10, 18)
 
     # Recompute extent of plotting area, as boundary is removed
-    boundary_size_x = (10/constants.grid_shape[0])*(
-            constants.grid_limits[1]-constants.grid_limits[0])
-    boundary_size_y = (10/constants.grid_shape[1])*(
-            constants.grid_limits[3]-constants.grid_limits[2])
+    boundary_size_x = (10/constants.GRID_SHAPE[0])*(
+            constants.GRID_LIMITS[1]-constants.GRID_LIMITS[0])
+    boundary_size_y = (10/constants.GRID_SHAPE[1])*(
+            constants.GRID_LIMITS[3]-constants.GRID_LIMITS[2])
     internal_grid_limits = (
-        constants.grid_limits[0] + boundary_size_x, # min x
-        constants.grid_limits[1] - boundary_size_x, # max x
-        constants.grid_limits[2] + boundary_size_y, # min y
-        constants.grid_limits[3] - boundary_size_y, # max y
+        constants.GRID_LIMITS[0] + boundary_size_x, # min x
+        constants.GRID_LIMITS[1] - boundary_size_x, # max x
+        constants.GRID_LIMITS[2] + boundary_size_y, # min y
+        constants.GRID_LIMITS[3] - boundary_size_y, # max y
     )
 
     # Make one plot per variable
-    for var_i, (var_name, var_unit, var_mean, var_std)in enumerate(zip(constants.param_names_short,
-            constants.param_units, data_mean, data_std)):
+    for var_i, (var_name, var_unit, var_mean, var_std)in enumerate(zip(constants.PARAM_NAMES_SHORT,
+            constants.PARAM_UNITS, data_mean, data_std)):
         # Extract q_hat:s to plot, and rescale to original data scale
         pred_plot = pred[time_indices,:,:,var_i]*var_std + var_mean # (3, N_y, N_x)
         target_plot = target[time_indices,:,:,var_i]*var_std + var_mean # (3, N_y, N_x)
@@ -286,7 +319,7 @@ def plot_pred(pred, target, data_mean, data_std):
         vmax = min(pred_plot.max(), target_plot.max())
 
         fig, axes = plt.subplots(2, len(time_indices), figsize=(8,6),
-                subplot_kw={"projection": constants.lambert_proj})
+                subplot_kw={"projection": constants.LAMBERT_PROJ})
 
         for fields, axes_row in zip((pred_plot, target_plot), axes):
             for field, ax, time_step in zip(fields, axes_row, time_indices):
@@ -318,9 +351,8 @@ def plot_pred(pred, target, data_mean, data_std):
 if __name__ == "__main__":
 
     # Obtaining the data by running the model.
-    # preds, targets = main()
-    # preds = torch.vstack(preds).numpy()
-    # targets = torch.vstack(targets).numpy()
+    predict_on_all()
+    exit()
 
     # Set seed
     np.random.seed(42)
