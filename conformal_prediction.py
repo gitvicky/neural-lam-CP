@@ -18,6 +18,7 @@ plt.rcParams['text.usetex'] = True
 # %%
 # Paths to saved models
 CKPT_DIR = "/proj/berzelius-2022-164/weather/ws_res_models"
+#CKPT_DIR = "saved_models"
 HI_LAM_WMSE_PATH = os.path.join(CKPT_DIR, "Hi-LAM.ckpt")
 HI_LAM_NLL_PATH = os.path.join(CKPT_DIR, "hi_lam_nll.ckpt")
 #GC_LAM_PATH = os.path.join(CKPT_DIR, "GC-LAM.ckpt")
@@ -140,13 +141,14 @@ def predict_on_all():
                 std_np = all_std.cpu().numpy()
                 np.save(os.path.join(model_save_dir, f"{subset_name}_std.npy"), std_np)
 
-def non_conformity(pred, target, cal_idx):
+def non_conformity(pred, target):
     print("Computing non-conformity scores")
-    n_samples = len(cal_idx)
+    n_samples = pred.shape[0]
     cal_scores_list = []
     # Iterate over samples, only requiring keeping one in memory at a time
-    for num_samples, sample_i in enumerate(cal_idx, start=1):
-        cal_scores_list.append(np.abs(pred[sample_i] - target[sample_i]))
+    for num_samples, (pred_sample, target_sample) in enumerate(
+            zip(pred, target), start=1):
+        cal_scores_list.append(np.abs(pred_sample - target_sample))
         if num_samples % 10 == 0:
             print(f"Sample {num_samples}/{n_samples}")
 
@@ -159,18 +161,23 @@ def qhat_estimate(cal_scores, alpha, overwrite_input):
     return np.quantile(cal_scores, np.ceil((n+1)*(1-alpha))/n, axis = 0,
             method='higher', overwrite_input=overwrite_input)
 
-def predict_coverage(pred, targets, qhat):
-    prediction_sets = [pred - qhat, pred + qhat]
-    empirical_coverage = ((targets >= prediction_sets[0]) &
-            (targets <= prediction_sets[1])).mean()
-    #print(f"The empirical coverage after calibration is: {empirical_coverage}")
-    return empirical_coverage, prediction_sets
-
 # %%
 
-def compute_qhats(preds, targets, cal_idx, alpha_levels):
+def compute_qhats_std(preds, targets, pred_std, alpha_levels):
+    cal_scores = non_conformity(preds, targets)
+
+    # Divide by pred_std to get new scores
+    cal_scores = cal_scores / pred_std
+
+    # Test coverage across values of alpha
+    qhats = qhat_estimate(cal_scores, alpha_levels, overwrite_input=True)
+    # Ok to overwrite input, we don't need cal_scores after this
+    return qhats # (N_qhats, T, N_y, N_x, dim_var)
+
+
+def compute_qhats(preds, targets, alpha_levels):
     #cal_scores = non_conformity(preds[cal_idx], targets[cal_idx])
-    cal_scores = non_conformity(preds, targets, cal_idx)
+    cal_scores = non_conformity(preds, targets)
     # qhat = qhat_estimate(cal_scores, alpha)
     # coverage, pred_sets = predict_coverage(preds[pred_idx], targets[pred_idx],  qhat)
 
@@ -179,41 +186,72 @@ def compute_qhats(preds, targets, cal_idx, alpha_levels):
     # Ok to overwrite input, we don't need cal_scores after this
     return qhats # (N_qhats, T, N_y, N_x, dim_var)
 
-def plot_emp_cov(preds, targets, qhats, pred_idx, alpha_levels):
+def predict_coverage(pred, targets, qhat):
+    prediction_sets = [pred - qhat, pred + qhat]
+    empirical_coverage = ((targets >= prediction_sets[0]) &
+            (targets <= prediction_sets[1])).mean()
+    #print(f"The empirical coverage after calibration is: {empirical_coverage}")
+    return empirical_coverage, prediction_sets
+
+def predict_coverage_std(pred, targets, pred_std, qhat):
+    prediction_sets = [pred - pred_std * qhat, pred + pred_std * qhat]
+    empirical_coverage = ((targets >= prediction_sets[0]) &
+            (targets <= prediction_sets[1])).mean()
+    #print(f"The empirical coverage after calibration is: {empirical_coverage}")
+    return empirical_coverage, prediction_sets
+
+def plot_emp_cov(preds, targets, qhats, alpha_levels, save_path,
+        pred_std=None, cp_method_label="Residual"):
     emp_cov = []
     #for alpha in tqdm(alpha_levels):
         #qhat = qhat_estimate(cal_scores, alpha)
     for qhat in tqdm(qhats):
         # Iterate over samples to save memory (pred and target are memmapped)
-        sample_coverages = [predict_coverage(preds[sample_i], targets[sample_i], qhat)[0]
-                for sample_i in pred_idx]
+        if pred_std is None:
+            sample_coverages = [predict_coverage(pred_sample, target_sample, qhat)[0]
+                    for pred_sample, target_sample in zip(preds, targets)]
+        else:
+            # Use predicted std in predictions sets
+            sample_coverages = [predict_coverage_std(
+                pred_sample,
+                target_sample,
+                pred_std_sample,
+                qhat)[0]
+                    for pred_sample, target_sample, pred_std_sample
+                    in zip(preds, targets, pred_std)]
         emp_cov.append(np.mean(np.array(sample_coverages)))
         #emp_cov.append(predict_coverage(preds[pred_idx], targets[pred_idx], qhat)[0])
 
     # Plot empirical coverage
     plt.plot(1-alpha_levels, 1-alpha_levels, label='Ideal', color ='black', alpha=0.75)
-    plt.plot(1-alpha_levels, emp_cov, label='Residual' ,ls='-.', color='teal',
+    plt.plot(1-alpha_levels, emp_cov, label=cp_method_label, ls='-.', color='teal',
             alpha=0.75)
     plt.xlabel(r'1-$\alpha$')
     plt.ylabel('Empirical Coverage')
-    plt.title("June")
+    #plt.title("June")
     plt.legend()
     plt.grid() #Comment out if you dont want grids.
-    # plt.savefig("June-Graphcast.svg", format="svg", bbox_inches='tight')
-    plt.show()
+    plt.savefig(save_path, format="pdf", bbox_inches='tight')
+    plt.close("all")
+    #plt.show()
 
-def plot_slice(preds, targets, pred_idx, qhat, alpha):
+def plot_slice(preds, targets, qhat, alpha, save_path, pred_std=None):
     #Slicing along X-Axis
 
-    idx = 10
+    idx = 2
     var = 10
     y_pos = 20
     time = 2
     x_grid = np.linspace(0, 1, 248)
 
-    pred = preds[pred_idx[idx]]
-    target = targets[pred_idx[idx]]
-    pred_sets = [pred - qhat, pred + qhat]
+    pred = preds[idx]
+    target = targets[idx]
+
+    if pred_std is None:
+        pred_sets = [pred - qhat, pred + qhat]
+    else:
+        pred_std_sample = pred_std[idx]
+        pred_sets = [pred - qhat*pred_std_sample, pred + qhat*pred_std_sample]
 
     plt.figure()
     plt.plot(x_grid, pred[time, :, y_pos, var], label='Pred.', alpha=0.8,
@@ -227,15 +265,17 @@ def plot_slice(preds, targets, pred_idx, qhat, alpha):
     plt.legend()
     plt.xlabel('X')
     plt.ylabel('var')
-    plt.title('Coverage at alpha = ' + str(alpha))
+    #plt.title('Coverage at alpha = ' + str(alpha))
     plt.grid() #Comment out if you dont want grids.
-    plt.show()
+    plt.savefig(save_path, format="pdf", bbox_inches='tight')
+    plt.close("all") # Close all figs
+    #plt.show()
 
-def plot_qhat(q_hat, alpha, data_std):
+def plot_interval_fields(interval_width, alpha, data_std, save_dir):
     """
-    Plot predictions intervals (q_hat)
+    Plot predictions interval width (q_hat if residual method)
 
-    q_hat: (T, N_y, N_x, dim_var)
+    interval_width: (T, N_y, N_x, dim_var)
     alpha: scalar
     data_std: (dim_var,)
     """
@@ -256,19 +296,19 @@ def plot_qhat(q_hat, alpha, data_std):
     # Make one plot per variable
     for var_i, (var_name, var_unit, var_std)in enumerate(zip(constants.PARAM_NAMES_SHORT,
             constants.PARAM_UNITS, data_std)):
-        # Extract q_hat:s to plot, and rescale to original data scale
-        q_hat_plot = q_hat[time_indices,:,:,var_i]*var_std # (3, N_y, N_x)
+        # Extract widths:s to plot, and rescale to original data scale
+        width_plot = interval_width[time_indices,:,:,var_i]*var_std # (3, N_y, N_x)
 
         # Compute range of values (makes most sense to keep vmin=0)
         vmin = 0 # q_hat_plot.min()
-        vmax = q_hat_plot.max()
+        vmax = width_plot.max()
 
-        fig, axes = plt.subplots(1, len(time_indices), figsize=(10,3),
+        fig, axes = plt.subplots(1, len(time_indices), figsize=(9,3),
                 subplot_kw={"projection": constants.LAMBERT_PROJ})
 
-        for q_hat_field, ax, time_step in zip(q_hat_plot, axes, time_indices):
+        for width_field, ax, time_step in zip(width_plot, axes, time_indices):
             ax.coastlines(linewidth=0.3) # Add coastline outlines
-            im = ax.imshow(q_hat_field, origin="lower",
+            im = ax.imshow(width_field, origin="lower",
                         extent=internal_grid_limits, vmin=vmin, vmax=vmax,
                         cmap="Reds")
 
@@ -278,10 +318,11 @@ def plot_qhat(q_hat, alpha, data_std):
         # Add color bar
         cbar = fig.colorbar(im, ax=axes, orientation="vertical", fraction=.01, aspect=50,
                 pad=0.01)
-        cbar.ax.set_ylabel("$\hat{q}$" + f" ({var_unit})")
+        cbar.ax.set_ylabel("Pred. interval width" + f" ({var_unit})")
 
         # Save
-        fig.savefig(os.path.join(PLOT_DIR, f"alpha_{alpha}_{var_name}_qhat.pdf"))
+        fig.savefig(os.path.join(save_dir, f"iwidth_alpha_{alpha}_{var_name}.pdf"),
+                bbox_inches='tight')
     plt.close("all") # Close all figs
 
 def plot_pred(pred, target, data_mean, data_std):
@@ -351,52 +392,85 @@ def plot_pred(pred, target, data_mean, data_std):
 if __name__ == "__main__":
 
     # Obtaining the data by running the model.
-    predict_on_all()
-    exit()
+    #predict_on_all()
 
     # Set seed
     np.random.seed(42)
 
-    #Loading the prediction and target data. pre-saved.
-    preds = np.load(os.getcwd() + '/saved_data/preds_june.npy',
-            mmap_mode="r") # (B, T, N_y, N_x, d_X)
-    targets = np.load(os.getcwd() + '/saved_data/targets_june.npy',
-            mmap_mode="r") # (B, T, N_y, N_x, d_X)
-    print("Loaded data!")
-
-    ncal = 200
-    nsamples = preds.shape[0]
-    alpha = 0.1
-    rand_idx = np.random.randint(0, nsamples, nsamples)
-    cal_idx = rand_idx[:ncal]
-    pred_idx = rand_idx[ncal:]
-    pred_idx = np.delete(np.arange(nsamples), cal_idx)
+    # Note: Need N > 19 samples to estimate for alpha = 0.05
     alpha_levels = np.arange(0.05, 0.95, 0.1)
 
-    # Compute qhat from saved predictions and targets
-    #  qhats = compute_qhats(preds, targets, cal_idx, alpha_levels)
-    #  np.save(os.getcwd() + '/saved_data/qhats_june.npy', qhats)
-    qhats = np.load(os.getcwd() + '/saved_data/qhats_june.npy')
+    # Perform CP for both models
+    for model_name, outputs_std in (
+        ("hi_lam_nll", True),
+        ("hi_lam_wmse", False)
+    ):
+        print(f"CP for {model_name} model")
+        pred_dir = os.path.join("saved_data", model_name)
 
-    # Compute and plot empirical coverage
-    #plot_emp_cov(preds, targets, qhats, pred_idx, alpha_levels)
+        #Loading the prediction and target data. pre-saved.
+        cal_preds = np.load(os.path.join(pred_dir, "val_pred.npy"),
+                mmap_mode="r") # (B, T, N_y, N_x, d_X)
+        cal_targets = np.load(os.path.join(pred_dir, "val_target.npy"),
+                mmap_mode="r") # (B, T, N_y, N_x, d_X)
+        eval_preds = np.load(os.path.join(pred_dir, "test_pred.npy"),
+                mmap_mode="r") # (B, T, N_y, N_x, d_X)
+        eval_targets = np.load(os.path.join(pred_dir, "test_target.npy"),
+                mmap_mode="r") # (B, T, N_y, N_x, d_X)
+        if outputs_std:
+            cal_std = np.load(os.path.join(pred_dir, "val_std.npy"),
+                mmap_mode="r") # (B, T, N_y, N_x, d_X)
+            eval_std = np.load(os.path.join(pred_dir, "test_std.npy"),
+                mmap_mode="r") # (B, T, N_y, N_x, d_X)
+        else:
+            cal_std = None
+            eval_std = None
+        print("Loaded data!")
 
-    # Plot slice of data
-    #  plot_slice(preds, targets, pred_idx, qhats[0], alpha_levels[0])
-    #  plot_slice(preds, targets, pred_idx, qhats[-1], alpha_levels[-1])
+        # Compute qhat from saved predictions and targets
+        #  np.save(os.getcwd() + '/saved_data/qhats_june.npy', qhats)
+        #  qhats = np.load(os.getcwd() + '/saved_data/qhats_june.npy')
+        model_plot_dir = os.path.join(PLOT_DIR, model_name)
+        os.makedirs(model_plot_dir, exist_ok=True)
+        coverage_plot_path = os.path.join(model_plot_dir, "emp_coverage.pdf")
 
-    # Get data stats
-    static_data = utils.load_static_data(DS_NAME)
-    data_std = static_data["data_std"].numpy()
-    data_mean = static_data["data_mean"].numpy()
+        if outputs_std:
+            qhats = compute_qhats_std(cal_preds, cal_targets, cal_std, alpha_levels)
+        else:
+            qhats = compute_qhats(cal_preds, cal_targets, alpha_levels)
 
-    # Plot q-hat spatio-temporally
-    #  os.makedirs(PLOT_DIR, exist_ok=True)
-    #  plot_qhat(qhats[0], alpha_levels[0], data_std)
-    #  plot_qhat(qhats[-1], alpha_levels[-1], data_std)
+        plot_emp_cov(eval_preds, eval_targets, qhats, alpha_levels,
+                coverage_plot_path, pred_std=eval_std,
+                cp_method_label="Scaled std." if outputs_std else "Residual")
 
-    # Plot example prediction
-    os.makedirs(PRED_PLOT_DIR, exist_ok=True)
-    example_pred = preds[pred_idx[0]] # From pred set
-    example_target = targets[pred_idx[0]]
-    plot_pred(example_pred, example_target, data_mean, data_std)
+        # Plot slice of data
+        plot_slice(eval_preds, eval_targets, qhats[0], alpha_levels[0],
+                os.path.join(model_plot_dir, f"slice_alpha_{alpha_levels[0]:.2}"),
+                pred_std=eval_std)
+        plot_slice(eval_preds, eval_targets, qhats[-1], alpha_levels[-1],
+                os.path.join(model_plot_dir, f"slice_alpha_{alpha_levels[-1]:.2}"),
+                pred_std=eval_std)
+
+        # Get data stats
+        static_data = utils.load_static_data(DS_NAME)
+        data_std = static_data["data_std"].numpy()
+        data_mean = static_data["data_mean"].numpy()
+
+        # Plot q-hat spatio-temporally
+        if outputs_std:
+            # Use first sample as example
+            plot_interval_fields(qhats[0]*eval_std[0], alpha_levels[0],
+                    data_std, model_plot_dir)
+            plot_interval_fields(qhats[-1]*eval_std[0], alpha_levels[-1],
+                    data_std, model_plot_dir)
+        else:
+            plot_interval_fields(qhats[0], alpha_levels[0],
+                    data_std, model_plot_dir)
+            plot_interval_fields(qhats[-1], alpha_levels[-1],
+                    data_std, model_plot_dir)
+
+        # Plot example prediction
+        #  os.makedirs(PRED_PLOT_DIR, exist_ok=True)
+        #  example_pred = preds[pred_idx[0]] # From pred set
+        #  example_target = targets[pred_idx[0]]
+        #  plot_pred(example_pred, example_target, data_mean, data_std)
