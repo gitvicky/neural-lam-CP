@@ -434,16 +434,19 @@ if __name__ == "__main__":
         os.makedirs(model_plot_dir, exist_ok=True)
         coverage_plot_path = os.path.join(model_plot_dir, "emp_coverage.pdf")
 
+        print("Computing q-hats")
         if outputs_std:
             qhats = compute_qhats_std(cal_preds, cal_targets, cal_std, alpha_levels)
         else:
             qhats = compute_qhats(cal_preds, cal_targets, alpha_levels)
 
+        print("Plotting empirical coverage")
         plot_emp_cov(eval_preds, eval_targets, qhats, alpha_levels,
                 coverage_plot_path, pred_std=eval_std,
                 cp_method_label="Scaled std." if outputs_std else "Residual")
 
         # Plot slice of data
+        print("Plotting slices")
         plot_slice(eval_preds, eval_targets, qhats[0], alpha_levels[0],
                 os.path.join(model_plot_dir, f"slice_alpha_{alpha_levels[0]:.2}"),
                 pred_std=eval_std)
@@ -456,7 +459,8 @@ if __name__ == "__main__":
         data_std = static_data["data_std"].numpy()
         data_mean = static_data["data_mean"].numpy()
 
-        # Plot q-hat spatio-temporally
+        # Plot interval width spatio-temporally
+        print("Plotting widths of prediction intervals")
         if outputs_std:
             # Use first sample as example
             plot_interval_fields(qhats[0]*eval_std[0], alpha_levels[0],
