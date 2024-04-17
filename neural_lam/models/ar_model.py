@@ -53,7 +53,7 @@ class ARModel(pl.LightningModule):
                 persistent=False,
             )
 
-        # grid_dim from data + static + batch_static
+        # grid_dim from data + static
         (
             self.num_grid_nodes,
             grid_static_dim,
@@ -62,7 +62,6 @@ class ARModel(pl.LightningModule):
             2 * constants.GRID_STATE_DIM
             + grid_static_dim
             + constants.GRID_FORCING_DIM
-            + constants.BATCH_STATIC_FEATURE_DIM
         )
 
         # Instantiate loss function
@@ -75,10 +74,10 @@ class ARModel(pl.LightningModule):
 
         self.step_length = args.step_length  # Number of hours per pred. step
         self.val_metrics = {
-            "rmse": [],
+            "mse": [],
         }
         self.test_metrics = {
-            "rmse": [],
+            "mse": [],
             "mae": [],
         }
         if self.output_std:
@@ -117,25 +116,19 @@ class ARModel(pl.LightningModule):
         """
         return x.unsqueeze(0).expand(batch_size, -1, -1)
 
-    def predict_step(
-        self, prev_state, prev_prev_state, batch_static_features, forcing
-    ):
+    def predict_step(self, prev_state, prev_prev_state, forcing):
         """
         Step state one step ahead using prediction model, X_{t-1}, X_t -> X_t+1
         prev_state: (B, num_grid_nodes, feature_dim), X_t
         prev_prev_state: (B, num_grid_nodes, feature_dim), X_{t-1}
-        batch_static_features: (B, num_grid_nodes, batch_static_feature_dim)
         forcing: (B, num_grid_nodes, forcing_dim)
         """
         raise NotImplementedError("No prediction step implemented")
 
-    def unroll_prediction(
-        self, init_states, batch_static_features, forcing_features, true_states
-    ):
+    def unroll_prediction(self, init_states, forcing_features, true_states):
         """
         Roll out prediction taking multiple autoregressive steps with model
         init_states: (B, 2, num_grid_nodes, d_f)
-        batch_static_features: (B, num_grid_nodes, d_static_f)
         forcing_features: (B, pred_steps, num_grid_nodes, d_static_f)
         true_states: (B, pred_steps, num_grid_nodes, d_f)
         """
@@ -150,7 +143,7 @@ class ARModel(pl.LightningModule):
             border_state = true_states[:, i]
 
             pred_state, pred_std = self.predict_step(
-                prev_state, prev_prev_state, batch_static_features, forcing
+                prev_state, prev_prev_state, forcing
             )
             # state: (B, num_grid_nodes, d_f)
             # pred_std: (B, num_grid_nodes, d_f) or None
@@ -184,24 +177,20 @@ class ARModel(pl.LightningModule):
     def common_step(self, batch):
         """
         Predict on single batch
-        batch = time_series, batch_static_features, forcing_features
-
+        batch consists of:
         init_states: (B, 2, num_grid_nodes, d_features)
         target_states: (B, pred_steps, num_grid_nodes, d_features)
-        batch_static_features: (B, num_grid_nodes, d_static_f),
-            for example open water
         forcing_features: (B, pred_steps, num_grid_nodes, d_forcing),
             where index 0 corresponds to index 1 of init_states
         """
         (
             init_states,
             target_states,
-            batch_static_features,
             forcing_features,
         ) = batch
 
         prediction, pred_std = self.unroll_prediction(
-            init_states, batch_static_features, forcing_features, target_states
+            init_states, forcing_features, target_states
         )  # (B, pred_steps, num_grid_nodes, d_f)
         # prediction: (B, pred_steps, num_grid_nodes, d_f)
         # pred_std: (B, pred_steps, num_grid_nodes, d_f) or (d_f,)
@@ -238,7 +227,9 @@ class ARModel(pl.LightningModule):
         """
         return self.all_gather(tensor_to_gather).flatten(0, 1)
 
-    def validation_step(self, batch):
+    # newer lightning versions requires batch_idx argument, even if unused
+    # pylint: disable-next=unused-argument
+    def validation_step(self, batch, batch_idx):
         """
         Run validation on single batch
         """
@@ -262,15 +253,15 @@ class ARModel(pl.LightningModule):
             val_log_dict, on_step=False, on_epoch=True, sync_dist=True
         )
 
-        # Store RMSEs
-        entry_rmses = metrics.rmse(
+        # Store MSEs
+        entry_mses = metrics.mse(
             prediction,
             target,
             pred_std,
             mask=self.interior_mask_bool,
             sum_vars=False,
         )  # (B, pred_steps, d_f)
-        self.val_metrics["rmse"].append(entry_rmses)
+        self.val_metrics["mse"].append(entry_mses)
 
     def on_validation_epoch_end(self):
         """
@@ -283,7 +274,8 @@ class ARModel(pl.LightningModule):
         for metric_list in self.val_metrics.values():
             metric_list.clear()
 
-    def test_step(self, batch):
+    # pylint: disable-next=unused-argument
+    def test_step(self, batch, batch_idx):
         """
         Run test on single batch
         """
@@ -314,7 +306,7 @@ class ARModel(pl.LightningModule):
         # Note: explicitly list metrics here, as test_metrics can contain
         # additional ones, computed differently, but that should be aggregated
         # on_test_epoch_end
-        for metric_name in ("rmse", "mae"):
+        for metric_name in ("mse", "mae"):
             metric_func = metrics.get_metric(metric_name)
             batch_metric_vals = metric_func(
                 prediction,
@@ -508,10 +500,16 @@ class ARModel(pl.LightningModule):
             )  # (N_eval, pred_steps, d_f)
 
             if self.trainer.is_global_zero:
+                metric_tensor_averaged = torch.mean(metric_tensor, dim=0)
+                # (pred_steps, d_f)
+
+                # Take square root after all averaging to change MSE to RMSE
+                if "mse" in metric_name:
+                    metric_tensor_averaged = torch.sqrt(metric_tensor_averaged)
+                    metric_name = metric_name.replace("mse", "rmse")
+
                 # Note: we here assume rescaling for all metrics is linear
-                metric_rescaled = (
-                    torch.mean(metric_tensor, dim=0) * self.data_std
-                )
+                metric_rescaled = metric_tensor_averaged * self.data_std
                 # (pred_steps, d_f)
                 log_dict.update(
                     self.create_metric_log_dict(
