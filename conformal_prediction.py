@@ -4,6 +4,8 @@ import torch
 import numpy as np
 from tqdm import tqdm
 from matplotlib import pyplot as plt
+import scipy.stats as sps
+import time
 
 #%%
 from neural_lam.models.graph_lam import GraphLAM
@@ -146,11 +148,9 @@ def non_conformity(pred, target):
     n_samples = pred.shape[0]
     cal_scores_list = []
     # Iterate over samples, only requiring keeping one in memory at a time
-    for num_samples, (pred_sample, target_sample) in enumerate(
-            zip(pred, target), start=1):
+    for num_samples, (pred_sample, target_sample) in tqdm(list(enumerate(
+            zip(pred, target), start=1))):
         cal_scores_list.append(np.abs(pred_sample - target_sample))
-        if num_samples % 10 == 0:
-            print(f"Sample {num_samples}/{n_samples}")
 
     cal_scores = np.stack(cal_scores_list, axis=0)
     #cal_scores = np.abs(pred-target)
@@ -433,6 +433,32 @@ if __name__ == "__main__":
         model_plot_dir = os.path.join(PLOT_DIR, model_name)
         os.makedirs(model_plot_dir, exist_ok=True)
         coverage_plot_path = os.path.join(model_plot_dir, "emp_coverage.pdf")
+
+        print("Computing values for alpha=0.1")
+        uncal_q = sps.norm().ppf(0.95) # ~= 1.645
+        cal_start_time = time.time()
+        if outputs_std:
+            qhat_spec = compute_qhats_std(cal_preds, cal_targets, cal_std,
+                    np.array([0.1]))[0]
+            cal_end_time = time.time()
+            emp_cov, prediction_sets = predict_coverage_std(
+                    eval_preds, eval_targets, eval_std, qhat_spec)
+            emp_cov_uncal, _ = predict_coverage_std(
+                eval_preds, eval_targets, eval_std, uncal_q
+            ) # qhat for assuming calibrated std
+            print(f"Empirical coverage (Uncalibrated): {emp_cov_uncal}")
+        else:
+            qhat_spec = compute_qhats(cal_preds, cal_targets, np.array([0.1]))[0]
+            cal_end_time = time.time()
+            emp_cov, prediction_sets = predict_coverage(
+                    eval_preds, eval_targets, qhat_spec)
+
+        # Still in normalized units here
+        tightness = (prediction_sets[1] - prediction_sets[0]).mean()
+        cal_time = cal_end_time - cal_start_time
+        print(f"Empirical coverage (Calibrated): {emp_cov}")
+        print(f"Tightness: {tightness}")
+        print(f"Calibration time: {cal_time} s")
 
         print("Computing q-hats")
         if outputs_std:
