@@ -325,7 +325,7 @@ def plot_interval_fields(interval_width, alpha, data_std, save_dir):
                 bbox_inches='tight')
     plt.close("all") # Close all figs
 
-def plot_pred(pred, target, data_mean, data_std):
+def plot_pred(pred, target, data_mean, data_std, save_dir):
     """
     Plot predictions and targets
 
@@ -385,7 +385,7 @@ def plot_pred(pred, target, data_mean, data_std):
             cbar.ax.set_ylabel(f"{var_unit}")
 
         # Save
-        fig.savefig(os.path.join(PRED_PLOT_DIR, f"{var_name}.pdf"),
+        fig.savefig(os.path.join(save_dir, f"{var_name}.pdf"),
                 bbox_inches='tight')
     plt.close("all") # Close all figs
 
@@ -427,12 +427,25 @@ if __name__ == "__main__":
             eval_std = None
         print("Loaded data!")
 
+        # Get data stats
+        static_data = utils.load_static_data(DS_NAME)
+        data_std = static_data["data_std"].numpy()
+        data_mean = static_data["data_mean"].numpy()
+
         # Compute qhat from saved predictions and targets
         #  np.save(os.getcwd() + '/saved_data/qhats_june.npy', qhats)
         #  qhats = np.load(os.getcwd() + '/saved_data/qhats_june.npy')
         model_plot_dir = os.path.join(PLOT_DIR, model_name)
         os.makedirs(model_plot_dir, exist_ok=True)
         coverage_plot_path = os.path.join(model_plot_dir, "emp_coverage.pdf")
+
+        # Plot example prediction
+        print("Plotting example predictions and targets")
+        pred_plot_dir = os.path.join(model_plot_dir, "example_pred")
+        os.makedirs(pred_plot_dir, exist_ok=True)
+        example_pred = eval_preds[0] # first sample from eval set
+        example_target = eval_targets[0]
+        plot_pred(example_pred, example_target, data_mean, data_std, pred_plot_dir)
 
         print("Computing values for alpha=0.1")
         uncal_q = sps.norm().ppf(0.95) # ~= 1.645
@@ -466,6 +479,9 @@ if __name__ == "__main__":
         else:
             qhats = compute_qhats(cal_preds, cal_targets, alpha_levels)
 
+        # Save q-hats
+        np.save(os.path.join(pred_dir, "qhats.npy"), qhats)
+
         print("Plotting empirical coverage")
         plot_emp_cov(eval_preds, eval_targets, qhats, alpha_levels,
                 coverage_plot_path, pred_std=eval_std,
@@ -479,11 +495,6 @@ if __name__ == "__main__":
         plot_slice(eval_preds, eval_targets, qhats[-1], alpha_levels[-1],
                 os.path.join(model_plot_dir, f"slice_alpha_{alpha_levels[-1]:.2}"),
                 pred_std=eval_std)
-
-        # Get data stats
-        static_data = utils.load_static_data(DS_NAME)
-        data_std = static_data["data_std"].numpy()
-        data_mean = static_data["data_mean"].numpy()
 
         # Plot interval width spatio-temporally
         print("Plotting widths of prediction intervals")
@@ -499,8 +510,4 @@ if __name__ == "__main__":
             plot_interval_fields(qhats[-1], alpha_levels[-1],
                     data_std, model_plot_dir)
 
-        # Plot example prediction
-        #  os.makedirs(PRED_PLOT_DIR, exist_ok=True)
-        #  example_pred = preds[pred_idx[0]] # From pred set
-        #  example_target = targets[pred_idx[0]]
-        #  plot_pred(example_pred, example_target, data_mean, data_std)
+
