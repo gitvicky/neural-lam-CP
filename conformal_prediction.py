@@ -19,7 +19,8 @@ plt.rcParams['text.usetex'] = True
 
 # %%
 # Paths to saved models
-CKPT_DIR = "/proj/berzelius-2022-164/weather/ws_res_models"
+#CKPT_DIR = "/proj/berzelius-2022-164/weather/ws_res_models"
+CKPT_DIR = "/capstor/store/cscs/swissai/a122/ojoel/neural_lam_cp/checkpoints"
 #CKPT_DIR = "saved_models"
 HI_LAM_WMSE_PATH = os.path.join(CKPT_DIR, "Hi-LAM.ckpt")
 HI_LAM_NLL_PATH = os.path.join(CKPT_DIR, "hi_lam_nll.ckpt")
@@ -32,11 +33,14 @@ INTERIOR_SHAPE = tuple(dim - 2*10 for dim in constants.GRID_SHAPE)
 # Actual config for CP
 MODEL = "Hi-LAM" # Hi-LAM or GC-LAM
 # must match sub-directory in data
-DS_NAME = "conf_data_sep" # sep 2021 + 2022
-#DS_NAME = "meps_example"
 BATCH_SIZE = 10
-PLOT_DIR = "cp_plots"
-PRED_PLOT_DIR = "cp_pred_plots"
+#  DS_NAME = "conf_data_ood" # sep 2021 + jan 2023
+#  PLOT_DIR = "cp_ood_plots"
+#  DATA_SAVE_DIR = "cp_ood_saved_data"
+DS_NAME = "conf_data_sep" # sep 2021 + 2022
+PLOT_DIR = "cp_sep_plots"
+DATA_SAVE_DIR = "cp_sep_saved_data"
+
 
 #%%
 @torch.no_grad()
@@ -107,10 +111,10 @@ def predict_on_all():
         model_args.graph = graph_name
         model_args.output_std = int(save_std) # Need to add on for older model
 
-        model_save_dir = os.path.join("saved_data", model_name)
+        model_save_dir = os.path.join(DATA_SAVE_DIR, model_name)
         os.makedirs(model_save_dir, exist_ok=True)
 
-        model = model_class.load_from_checkpoint(ckpt_path, args=model_args).to(device)
+        model = model_class.load_from_checkpoint(ckpt_path, args=model_args).to(device).eval()
 
         for subset_name, loader in (
             ("val", val_loader),
@@ -121,16 +125,16 @@ def predict_on_all():
             pred = []
             targ = []
             stds = []
-            for batch in tqdm(val_loader):
+            for batch in tqdm(loader):
                 batch = (t.to(device) for t in batch)
                 prediction, target, pred_std = predict_on_batch(model, batch)
                 # all of shape (B, T, N_y, N_x, d_X)
 
-                pred.append(prediction)
-                targ.append(target)
-                stds.append(pred_std)
+                pred.append(prediction.cpu())
+                targ.append(target.cpu())
+                stds.append(pred_std.cpu())
 
-            pred_np = torch.cat(pred, dim=0).cpu().numpy()
+            pred_np = torch.cat(pred, dim=0).numpy()
             np.save(os.path.join(model_save_dir, f"{subset_name}_pred.npy"), pred_np)
             del pred_np
 
@@ -392,7 +396,7 @@ def plot_pred(pred, target, data_mean, data_std, save_dir):
 if __name__ == "__main__":
 
     # Obtaining the data by running the model.
-    #predict_on_all()
+    predict_on_all()
 
     # Set seed
     np.random.seed(42)
@@ -406,7 +410,7 @@ if __name__ == "__main__":
         ("hi_lam_wmse", False)
     ):
         print(f"CP for {model_name} model")
-        pred_dir = os.path.join("saved_data", model_name)
+        pred_dir = os.path.join(DATA_SAVE_DIR, model_name)
 
         #Loading the prediction and target data. pre-saved.
         cal_preds = np.load(os.path.join(pred_dir, "val_pred.npy"),
@@ -490,10 +494,10 @@ if __name__ == "__main__":
         # Plot slice of data
         print("Plotting slices")
         plot_slice(eval_preds, eval_targets, qhats[0], alpha_levels[0],
-                os.path.join(model_plot_dir, f"slice_alpha_{alpha_levels[0]:.2}"),
+                os.path.join(model_plot_dir, f"slice_alpha_{alpha_levels[0]:.2}.pdf"),
                 pred_std=eval_std)
         plot_slice(eval_preds, eval_targets, qhats[-1], alpha_levels[-1],
-                os.path.join(model_plot_dir, f"slice_alpha_{alpha_levels[-1]:.2}"),
+                os.path.join(model_plot_dir, f"slice_alpha_{alpha_levels[-1]:.2}.pdf"),
                 pred_std=eval_std)
 
         # Plot interval width spatio-temporally
